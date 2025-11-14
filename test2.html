@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THREE.js 挤压几何体示例</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 8px;
+            z-index: 100;
+        }
+        button {
+            background-color: #4CAF50; /* Green */
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #controls {
+            position: absolute;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            display: flex;
+            flex-direction: column; /* 垂直排列按钮 */
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <h3>挤压几何体示例</h3>
+        <p>所有点 Z 坐标相同，法线应为 (0,0,1) 或 (0,0,-1)。</p>
+        <p>尝试切换定位方式以观察效果。</p>
+        <p>当前定位方式: <span id="currentPositionMode">原始方式 (顶部在中心)</span></p>
+        <p>平滑挤压: <span id="currentSmoothMode">关</span></p>
+        <p>网格原点 (世界): <span id="meshOriginWorld"></span></p>
+        <p>点0原点 (世界): <span id="point0World"></span></p>
+    </div>
+    <div id="controls">
+        <button id="togglePositionBtn">切换定位方式</button>
+        <button id="toggleSmoothBtn">切换平滑挤压</button>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // 你的 generateExtrudeGeometry 函数
+        // smoothFactor: 如果 > 1，则使用 CatmullRomCurve3 生成更平滑的 2D 点
+        function generateExtrudeGeometry(points, depth, smoothFactor = 1) {
+            if (points.length < 3) {
+                console.warn('至少需要三个点来创建挤压几何体');
+                return null; // 返回 null 以指示失败
+            }
+
+            // 确保前三个点不共线，避免法线计算问题
+            const p0 = new THREE.Vector3(points[0].x, points[0].y, points[0].z);
+            const p1 = new THREE.Vector3(points[1].x, points[1].y, points[1].z);
+            const p2 = new THREE.Vector3(points[2].x, points[2].y, points[2].z);
+
+            const v1_check = new THREE.Vector3().subVectors(p1, p0);
+            const v2_check = new THREE.Vector3().subVectors(p2, p0);
+            const crossProductMagnitude = v1_check.clone().cross(v2_check).length();
+
+            if (crossProductMagnitude < 1e-6) {
+                console.warn('前三个点共线，无法确定平面。挤压几何体可能不正确。');
+                return null;
+            }
+
+            const center = p0.clone(); // 使用 points[0] 作为平面坐标系的中心
+
+            // 计算法线
+            const normal = new THREE.Vector3().crossVectors(v1_check, v2_check).normalize();
+
+            // 定义平面坐标系的基向量
+            const u = new THREE.Vector3().subVectors(p1, center).normalize();
+            const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+            let pointsToProject = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
+
+            // 如果 smoothFactor > 1，则使用 CatmullRomCurve3 生成更密集的点
+            if (smoothFactor > 1 && pointsToProject.length > 1) {
+                const curve = new THREE.CatmullRomCurve3(pointsToProject);
+                // 生成比原始点多 smoothFactor 倍的点
+                pointsToProject = curve.getPoints(pointsToProject.length * smoothFactor);
+            }
+
+            // 将 3D 点投影到 2D 平面
+            const points2D = pointsToProject.map((point) => {
+                const p_rel = new THREE.Vector3().subVectors(point, center);
+                return new THREE.Vector2(p_rel.dot(u), p_rel.dot(v));
+            });
+
+            // --- 新增: 计算 points2D 的几何中心并平移，使得 Shape 自身居中 ---
+            if (points2D.length === 0) {
+                 console.warn('生成的2D点集为空，无法创建形状。');
+                 return null;
+            }
+
+            let minX = Infinity, minY = Infinity;
+            let maxX = -Infinity, maxY = -Infinity;
+            points2D.forEach(p => {
+                minX = Math.min(minX, p.x);
+                minY = Math.min(minY, p.y);
+                maxX = Math.max(maxX, p.x);
+                maxY = Math.max(maxY, p.y);
+            });
+
+            const boundingBoxCenterX = (minX + maxX) / 2;
+            const boundingBoxCenterY = (minY + maxY) / 2;
+
+            // 平移 points2D，使其边界框中心位于 (0,0)
+            const finalPoints2DForShape = points2D.map(p => {
+                return new THREE.Vector2(p.x - boundingBoxCenterX, p.y - boundingBoxCenterY);
+            });
+            // --- 结束新增 ---
+
+            const shape = new THREE.Shape();
+            // 使用新的，已居中的点来创建形状
+            shape.moveTo(finalPoints2DForShape[0].x, finalPoints2DForShape[0].y);
+            for (let i = 1; i < finalPoints2DForShape.length; i++) {
+                shape.lineTo(finalPoints2DForShape[i].x, finalPoints2DForShape[i].y);
+            }
+            shape.closePath();
+
+            const extrudeSettings = { depth: depth, bevelEnabled: false };
+            const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+            // 返回 initialP0 (points[0]) 仍然用于可视化和参考
+            return { geometry, normal, initialP0: center };
+        }
+
+        // 提供的点数据
+        const arcPointsData = [
+            { "x": -1894.079705274161, "y": 3922.834185616532, "z": 1190.6668701159429 },
+            { "x": -1903.1807778180987, "y": 3929.8690348639566, "z": 1190.6668701159429 },
+            { "x": -1912.5833476259277, "y": 3936.6770731948327, "z": 1190.6668701159429 },
+            { "x": -1922.277363867098, "y": 3943.251035955441, "z": 1190.6668701159429 },
+            { "x": -1932.2524666723273, "y": 3949.583910532543, "z": 1190.6668701159429 },
+            { "x": -1942.4979983375006, "y": 3955.668943437536, "z": 1190.6668701159429 },
+            { "x": -1953.0030147828188, "y": 3961.4996471304826, "z": 1190.6668701159429 },
+            { "x": -1963.7562972633962, "y": 3967.069806581953, "z": 1190.6668701159429 },
+            { "x": -1974.746364326818, "y": 3972.373485569144, "z": 1190.6668701159429 },
+            { "x": -1985.961484012298, "y": 3977.405032701572, "z": 1190.6668701159429 },
+            { "x": -1997.3896862850715, "y": 3982.1590871708163, "z": 1190.6668701159429 },
+            { "x": -2009.0187756986445, "y": 3986.630584218248, "z": 1190.6668701159429 },
+            { "x": -2020.8363442764894, "y": 3990.8147603143175, "z": 1190.6668701159429 },
+            { "x": -2032.8297846037935, "y": 3994.707158042896, "z": 1190.6668701159429 },
+            { "x": -2044.9863031189614, "y": 3998.303630684185, "z": 1190.6668701159429 },
+            { "x": -2057.2929335937056, "y": 4001.6003464898927, "z": 1190.6668701159429 },
+            { "x": -2069.736550789821, "y": 4004.5937926446704, "z": 1190.6668701159429 },
+            { "x": -2082.3038842800556, "y": 4007.280778908162, "z": 1190.6668701159429 },
+            { "x": -2094.981532419896, "y": 4009.6584409324387, "z": 1190.6668701159429 },
+            { "x": -2107.755976456579, "y": 4011.7242432500734, "z": 1190.6668701159429 },
+            { "x": -2120.61359476122, "y": 4013.475981928659, "z": 1190.6668701159429 },
+            { "x": -2133.5406771695684, "y": 4014.9117868880057, "z": 1190.6668701159429 },
+            { "x": -2146.5234394166246, "y": 4016.0301238769525, "z": 1190.6668701159429 },
+            { "x": -2159.5480376501305, "y": 4016.8297961071394, "z": 1190.6668701159429 },
+            { "x": -2172.600583007758, "y": 4017.3099455417696, "z": 1190.6668701159429 },
+            { "x": -2185.6671562427255, "y": 4017.4700538379257, "z": 1190.6668701159429 },
+            { "x": -2198.7337294776935, "y": 4017.30994554177, "z": 1190.6668701159429 },
+            { "x": -2211.7862748353205, "y": 4016.8297961071394, "z": 1190.6668701159429 },
+            { "x": -2224.8108730688264, "y": 4016.0301238769534, "z": 1190.6668701159429 },
+            { "x": -2237.7936353158825, "y": 4014.9117868880057, "z": 1190.6668701159429 },
+            { "x": -2250.720717724231, "y": 4013.475981928658, "z": 1190.6668701159429 },
+            { "x": -2263.578336028872, "y": 4011.724243250074, "z": 1190.6668701159429 },
+            { "x": -2276.352780065555, "y": 4009.6584409324378, "z": 1190.6668701159429 },
+            { "x": -2289.030428205395, "y": 4007.280778908163, "z": 1190.6668701159429 },
+            { "x": -2301.59776169563, "y": 4004.5937926446704, "z": 1190.6668701159429 },
+            { "x": -2314.0413788917454, "y": 4001.600346489892, "z": 1190.6668701159429 },
+            { "x": -2326.3480093664894, "y": 3998.303630684185, "z": 1190.6668701159429 },
+            { "x": -2338.5045278816574, "y": 3994.7071580428965, "z": 1190.6668701159429 },
+            { "x": -2350.4979682089615, "y": 3990.814760314317, "z": 1190.6668701159429 },
+            { "x": -2362.3155367868067, "y": 3986.630584218248, "z": 1190.6668701159429 },
+            { "x": -2373.94462620038, "y": 3982.1590871708154, "z": 1190.6668701159429 },
+            { "x": -2385.372828473153, "y": 3977.405032701572, "z": 1190.6668701159429 },
+            { "x": -2396.587948158633, "y": 3972.373485569144, "z": 1190.6668701159429 },
+            { "x": -2407.578015222055, "y": 3967.069806581953, "z": 1190.6668701159429 },
+            { "x": -2418.331297702632, "y": 3961.499647130482, "z": 1190.6668701159429 },
+            { "x": -2428.836314147951, "y": 3955.668943437537, "z": 1190.6668701159429 },
+            { "x": -2439.0818458131225, "y": 3949.5839105325426, "z": 1190.6668701159429 },
+            { "x": -2449.0569486183535, "y": 3943.2510359554403, "z": 1190.6668701159429 },
+            { "x": -2458.750964859523, "y": 3936.677073194833, "z": 1190.6668701159429 },
+            { "x": -2468.1535346673513, "y": 3929.8690348639575, "z": 1190.6668701159429 },
+            { "x": -2477.254607211291, "y": 3922.8341856165334, "z": 1190.6668701159429 }
+        ];
+
+        let camera, scene, renderer, controls;
+        let osbMesh;
+        let smoothCurveLine; // 用于可视化平滑曲线
+        const mfDepth = 200; // 挤压深度
+        let useOriginalPositioning = true; // 控制定位方式 (此版本已不再切换，统一使用几何中心定位)
+        let useSmoothExtrusion = false; // 控制是否使用平滑挤压
+
+        function init() {
+            // 场景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x222222);
+
+            // 摄像机
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 100000);
+            // 初始摄像机位置，需要根据点的坐标范围进行调整，使其能看到物体
+            const firstPoint = arcPointsData[0];
+            camera.position.set(firstPoint.x - 1000, firstPoint.y - 1000, firstPoint.z + 2000); // 调整初始视角
+            camera.lookAt(firstPoint.x, firstPoint.y, firstPoint.z);
+
+            // 渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 控制器
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // 启用阻尼（惯性）
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false; // 禁用屏幕空间平移
+            controls.maxDistance = 100000;
+            controls.minDistance = 100;
+
+            // 环境光
+            scene.add(new THREE.AmbientLight(0x404040)); // soft white light
+
+            // 平行光
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.75);
+            directionalLight.position.set(1, 1, 1); // 从右上方照射
+            scene.add(directionalLight);
+
+            // 添加坐标轴助手，帮助理解方向
+            const axesHelper = new THREE.AxesHelper(500); // 长度为 500
+            scene.add(axesHelper);
+
+            // 创建并添加挤压几何体
+            addExtrudedMesh();
+            // 添加平滑曲线可视化
+            addSmoothCurveVisualization();
+
+
+            // 调整摄像机目标以中心化对象
+            // 确保osbMesh在场景中已存在
+            if (osbMesh) {
+                const bbox = new THREE.Box3().setFromObject(osbMesh);
+                const centerOfObject = new THREE.Vector3();
+                bbox.getCenter(centerOfObject);
+                controls.target.copy(centerOfObject);
+                controls.update();
+            }
+
+
+            // 监听窗口大小变化
+            window.addEventListener('resize', onWindowResize, false);
+
+            // 监听按钮点击
+            // togglePositionBtn 现在仅作为示范，其逻辑已被移除
+            document.getElementById('togglePositionBtn').style.display = 'none'; // 隐藏此按钮
+            document.getElementById('toggleSmoothBtn').addEventListener('click', toggleSmoothExtrusion);
+        }
+
+        function addExtrudedMesh() {
+            // 移除旧的网格（如果存在）
+            if (osbMesh) {
+                scene.remove(osbMesh);
+                osbMesh.geometry.dispose();
+                osbMesh.material.dispose();
+            }
+
+            // 根据 useSmoothExtrusion 决定平滑因子
+            const smoothFactor = useSmoothExtrusion ? 10 : 1; // 10 倍点数使其更平滑
+            const { geometry, normal, initialP0 } = generateExtrudeGeometry(arcPointsData, mfDepth, smoothFactor);
+            if (!geometry) {
+                return;
+            }
+
+            const material = new THREE.MeshPhongMaterial({ color: 0x007bff, side: THREE.DoubleSide }); // 蓝色，双面显示
+            osbMesh = new THREE.Mesh(geometry, material);
+            osbMesh.name = 'arcOsb';
+
+            // 设置旋转：将几何体的局部Z轴对齐到计算出的法线
+            const alignQuaternion = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+            osbMesh.setRotationFromQuaternion(alignQuaternion);
+
+            // --- 新增: 计算所有原始 3D 输入点的几何中心 ---
+            const worldGeometricCenter = new THREE.Vector3();
+            if (arcPointsData.length > 0) {
+                arcPointsData.forEach(p => worldGeometricCenter.add(new THREE.Vector3(p.x, p.y, p.z)));
+                worldGeometricCenter.divideScalar(arcPointsData.length);
+            } else {
+                worldGeometricCenter.copy(initialP0); // Fallback to points[0] if no points
+            }
+
+            // --- 统一使用几何中心定位 ---
+            // 此时，geometry的本地原点 (0,0,0) 对应其2D截面形状的几何中心。
+            // 将网格放置在原始3D点的几何中心。
+            osbMesh.position.copy(worldGeometricCenter);
+            
+            // --- 调试信息更新 ---
+            document.getElementById('currentPositionMode').textContent = '统一居中定位';
+
+            // --- 调试: 打印并显示网格原点和点0原点 ---
+            osbMesh.updateMatrixWorld(); // 确保世界矩阵最新
+            const meshOriginWorld = new THREE.Vector3();
+            osbMesh.getWorldPosition(meshOriginWorld); // 获取网格在世界坐标系的原点
+
+            const point0World = new THREE.Vector3(arcPointsData[0].x, arcPointsData[0].y, arcPointsData[0].z);
+
+            document.getElementById('meshOriginWorld').textContent = `X: ${meshOriginWorld.x.toFixed(2)}, Y: ${meshOriginWorld.y.toFixed(2)}, Z: ${meshOriginWorld.z.toFixed(2)}`;
+            document.getElementById('point0World').textContent = `X: ${point0World.x.toFixed(2)}, Y: ${point0World.y.toFixed(2)}, Z: ${point0World.z.toFixed(2)}`;
+
+
+            // 移除旧的调试点（如果存在）
+            scene.children.forEach(child => {
+                if (child.userData.isDebugPoint) {
+                    scene.remove(child);
+                    child.geometry.dispose();
+                    child.material.dispose();
+                }
+            });
+
+            // 将原始输入点可视化（红色小球）
+            arcPointsData.forEach((ptData) => {
+                const geometry = new THREE.SphereGeometry(20, 16, 16); // 点球体
+                const material = new THREE.MeshBasicMaterial({ color: 0xff0000 }); // 红色
+                const sphere = new THREE.Mesh(geometry, material);
+                sphere.position.set(ptData.x, ptData.y, ptData.z);
+                sphere.userData.isDebugPoint = true; // 标记为调试点
+                scene.add(sphere);
+            });
+
+            // 添加原始 points[0] 的可视化（绿色大球）
+            const centerSphereGeometry = new THREE.SphereGeometry(30, 16, 16);
+            const centerSphereMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 }); // 绿色
+            const centerSphere = new THREE.Mesh(centerSphereGeometry, centerSphereMaterial);
+            centerSphere.position.copy(initialP0); // initialP0 就是 points[0]
+            centerSphere.userData.isDebugPoint = true; // 标记为调试点
+            scene.add(centerSphere);
+            
+            // 可视化 extruded mesh 的局部边界框（青色线框），它会随着 mesh 一起移动和旋转
+            const bboxHelper = new THREE.BoxHelper(osbMesh, 0x00ffff); // 青色
+            bboxHelper.userData.isDebugPoint = true; // 也标记为调试点以便清除
+            osbMesh.add(bboxHelper); // 作为 mesh 的子对象添加，以便随 mesh 变换
+
+
+            scene.add(osbMesh);
+        }
+
+        // 添加平滑曲线可视化函数
+        function addSmoothCurveVisualization() {
+            // 移除旧的平滑曲线（如果存在）
+            if (smoothCurveLine) {
+                scene.remove(smoothCurveLine);
+                smoothCurveLine.geometry.dispose();
+                smoothCurveLine.material.dispose();
+            }
+
+            const threePoints = arcPointsData.map(p => new THREE.Vector3(p.x, p.y, p.z));
+            if (threePoints.length < 2) return; // 至少需要两个点才能形成曲线
+
+            const curve = new THREE.CatmullRomCurve3(threePoints);
+            const curvePoints = curve.getPoints(500); // 获取 500 个点，形成平滑曲线
+            const geometry = new THREE.BufferGeometry().setFromPoints(curvePoints);
+            const material = new THREE.LineBasicMaterial({ color: 0xffff00 }); // 黄色线
+            smoothCurveLine = new THREE.Line(geometry, material);
+            scene.add(smoothCurveLine);
+        }
+
+
+        // 切换定位方式按钮的逻辑已被移除，现在统一使用几何中心定位
+        function togglePositioning() {
+            // useOriginalPositioning = !useOriginalPositioning;
+            // addExtrudedMesh(); // 重新添加网格以应用新的定位
+            // // 重新调整摄像机目标以中心化对象
+            // const bbox = new THREE.Box3().setFromObject(osbMesh);
+            // const centerOfObject = new THREE.Vector3();
+            // bbox.getCenter(centerOfObject);
+            // controls.target.copy(centerOfObject);
+            // controls.update();
+        }
+
+        function toggleSmoothExtrusion() {
+            useSmoothExtrusion = !useSmoothExtrusion;
+            const smoothInfoText = document.getElementById('currentSmoothMode');
+            smoothInfoText.textContent = useSmoothExtrusion ? '开' : '关';
+            addExtrudedMesh(); // 重新添加网格以应用新的平滑设置
+            // 重新调整摄像机目标以中心化对象
+            if (osbMesh) {
+                const bbox = new THREE.Box3().setFromObject(osbMesh);
+                const centerOfObject = new THREE.Vector3();
+                bbox.getCenter(centerOfObject);
+                controls.target.copy(centerOfObject);
+                controls.update();
+            }
+        }
+
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); // 只有当 controls.enableDamping 为 true 时才需要
+            renderer.render(scene, camera);
+        }
+
+        window.onload = function () {
+            init();
+            animate();
+        };
+    </script>
+</body>
+</html>

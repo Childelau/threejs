@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>SVG 转 PDF 示例 (模块化)</title>
+  <link rel="stylesheet" href="https://printjs-4de6.kxcdn.com/print.min.css" />
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+    }
+    svg {
+      border: 1px solid #ccc;
+      width: 400px;
+      height: 300px;
+    }
+    button {
+      margin-top: 20px;
+      padding: 8px 16px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h2>SVG → PDF (保持矢量)</h2>
+  <svg id="cadSvg" viewBox="0 0 400 300">
+    <!-- 模拟 CAD 图形 -->
+    <rect x="80" y="100" width="240" height="100" fill="none" stroke="black" stroke-width="1.5"/>
+    <!-- 尺寸线 -->
+    <line x1="80" y1="220" x2="320" y2="220" stroke="black" stroke-width="1"/>
+    <line x1="80" y1="220" x2="80" y2="230" stroke="black" stroke-width="1"/>
+    <line x1="320" y1="220" x2="320" y2="230" stroke="black" stroke-width="1"/>
+    <text x="200" y="235" font-size="12" text-anchor="middle">240 mm</text>
+
+    <line x1="60" y1="100" x2="60" y2="200" stroke="blue" stroke-width="1"/>
+    <line x1="60" y1="100" x2="70" y2="100" stroke="red" stroke-width="1"/>
+    <line x1="60" y1="200" x2="70" y2="200" stroke="black" stroke-width="1"/>
+    <text x="55" y="155" font-size="12" text-anchor="middle" transform="rotate(-90,55,155)">100 mm</text>
+
+    <!-- 辅助标注箭头 -->
+    <polygon points="80,220 85,217 85,223" fill="black"/>
+    <polygon points="320,220 315,217 315,223" fill="black"/>
+  </svg>
+
+  <button id="btnExport">导出 PDF 并打印</button>
+
+  <script type="module">
+    // 使用 ES6 模块导入
+    import jsPDF from 'jspdf';
+    import svg2pdf from 'svg2pdf.js';
+
+    document.getElementById("btnExport").addEventListener("click", async () => {
+      try {
+        const svgElement = document.getElementById("cadSvg");
+        
+        const pdf = new jsPDF({
+          orientation: "landscape",
+          unit: "pt",
+          format: [400, 300]
+        });
+
+        // 使用 svg2pdf.js API
+        await svg2pdf(svgElement, pdf, {
+          x: 0,
+          y: 0,
+          width: 400,
+          height: 300
+        });
+
+        pdf.save("cad_drawing.pdf");
+
+        // 可选打印 (需要 print.js 支持)
+        // const blob = pdf.output('bloburl');
+        // printJS(blob);
+        
+        alert('PDF 导出成功！');
+      } catch (error) {
+        console.error('导出失败:', error);
+        alert('导出 PDF 失败: ' + error.message);
+      }
+    });
+  </script>
+</body>
+</html>

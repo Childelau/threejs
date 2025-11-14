@@ -1,0 +1,525 @@
+import * as THREE from 'three';
+
+import Stats from 'three/addons/libs/stats.module.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { radixSort } from 'three/addons/utils/SortUtils.js';
+
+let stats, gui, guiStatsEl;
+let camera, controls, scene, renderer;
+let geometries, mesh, material;
+const ids = [];
+const matrix = new THREE.Matrix4();
+
+// 添加射线检测器
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+// 添加选中状态管理
+let selectedInstances = new Set();
+let originalColors = new Map(); // 存储原始颜色
+
+//
+
+const position = new THREE.Vector3();
+const rotation = new THREE.Euler();
+const quaternion = new THREE.Quaternion();
+const scale = new THREE.Vector3();
+
+//
+
+const MAX_GEOMETRY_COUNT = 20000;
+
+const Method = {
+    BATCHED: 'BATCHED',
+    NAIVE: 'NAIVE'
+};
+
+const api = {
+    method: Method.BATCHED,
+    count: 256,
+    dynamic: 16,
+
+    sortObjects: true,
+    perObjectFrustumCulled: true,
+    opacity: 1,
+    useCustomSort: true,
+};
+
+init();
+initGeometries();
+initMesh();
+
+//
+
+function randomizeMatrix( matrix ) {
+
+    position.x = Math.random() * 40 - 20;
+    position.y = Math.random() * 40 - 20;
+    position.z = Math.random() * 40 - 20;
+
+    rotation.x = Math.random() * 2 * Math.PI;
+    rotation.y = Math.random() * 2 * Math.PI;
+    rotation.z = Math.random() * 2 * Math.PI;
+
+    quaternion.setFromEuler( rotation );
+
+    scale.x = scale.y = scale.z = 0.5 + ( Math.random() * 0.5 );
+
+    return matrix.compose( position, quaternion, scale );
+
+}
+
+function randomizeRotationSpeed( rotation ) {
+
+    rotation.x = Math.random() * 0.01;
+    rotation.y = Math.random() * 0.01;
+    rotation.z = Math.random() * 0.01;
+    return rotation;
+
+}
+
+function initGeometries() {
+
+    geometries = [
+        new THREE.ConeGeometry( 1.0, 2.0 ),
+        new THREE.BoxGeometry( 2.0, 2.0, 2.0 ),
+        new THREE.SphereGeometry( 1.0, 16, 8 ),
+    ];
+
+}
+
+function createMaterial() {
+
+    if ( ! material ) {
+
+        material = new THREE.MeshNormalMaterial();
+
+    }
+
+    return material;
+
+}
+
+function cleanup() {
+
+    if ( mesh ) {
+
+        mesh.parent.remove( mesh );
+
+        if ( mesh.dispose ) {
+
+            mesh.dispose();
+
+        }
+
+    }
+
+}
+
+function initMesh() {
+
+    cleanup();
+
+    if ( api.method === Method.BATCHED ) {
+
+        initBatchedMesh();
+
+    } else {
+
+        initRegularMesh();
+
+    }
+
+}
+
+function initRegularMesh() {
+
+    mesh = new THREE.Group();
+    const material = createMaterial();
+
+    for ( let i = 0; i < api.count; i ++ ) {
+
+        const child = new THREE.Mesh( geometries[ i % geometries.length ], material );
+        randomizeMatrix( child.matrix );
+        child.matrix.decompose( child.position, child.quaternion, child.scale );
+        child.userData.rotationSpeed = randomizeRotationSpeed( new THREE.Euler() );
+        mesh.add( child );
+
+    }
+
+    scene.add( mesh );
+
+}
+
+function initBatchedMesh() {
+
+    const geometryCount = api.count;
+    const vertexCount = geometries.length * 512;
+    const indexCount = geometries.length * 1024;
+
+    const euler = new THREE.Euler();
+    const matrix = new THREE.Matrix4();
+    mesh = new THREE.BatchedMesh( geometryCount, vertexCount, indexCount, createMaterial() );
+    mesh.userData.rotationSpeeds = [];
+
+    // disable full-object frustum culling since all of the objects can be dynamic.
+    mesh.frustumCulled = false;
+
+    ids.length = 0;
+
+    const geometryIds = [
+        mesh.addGeometry( geometries[ 0 ] ),
+        mesh.addGeometry( geometries[ 1 ] ),
+        mesh.addGeometry( geometries[ 2 ] ),
+    ];
+
+    for ( let i = 0; i < api.count; i ++ ) {
+
+        const id = mesh.addInstance( geometryIds[ i % geometryIds.length ] );
+        mesh.setMatrixAt( id, randomizeMatrix( matrix ) );
+
+        const rotationMatrix = new THREE.Matrix4();
+        rotationMatrix.makeRotationFromEuler( randomizeRotationSpeed( euler ) );
+        mesh.userData.rotationSpeeds.push( rotationMatrix );
+
+        ids.push( id );
+
+    }
+
+    scene.add( mesh );
+
+}
+
+function init() {
+
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    // camera
+
+    camera = new THREE.PerspectiveCamera( 70, width / height, 1, 100 );
+    camera.position.z = 30;
+
+    // renderer
+
+    renderer = new THREE.WebGLRenderer( { antialias: true } );
+    renderer.setPixelRatio( window.devicePixelRatio );
+    renderer.setSize( width, height );
+    renderer.setAnimationLoop( animate );
+    document.body.appendChild( renderer.domElement );
+
+    // 添加鼠标点击事件监听
+    renderer.domElement.addEventListener( 'click', onMouseClick, false );
+
+    // scene
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color( 0xffffff );
+
+    // controls
+
+    controls = new OrbitControls( camera, renderer.domElement );
+    controls.autoRotate = false; // 禁用相机自动旋转
+    controls.autoRotateSpeed = 1.0;
+
+    // stats
+
+    stats = new Stats();
+    document.body.appendChild( stats.dom );
+
+    // gui
+
+    gui = new GUI();
+    gui.add( api, 'count', 1, MAX_GEOMETRY_COUNT ).step( 1 ).onChange( initMesh );
+    gui.add( api, 'dynamic', 0, MAX_GEOMETRY_COUNT ).step( 1 );
+    gui.add( api, 'method', Method ).onChange( initMesh );
+    gui.add( api, 'opacity', 0, 1 ).onChange( v => {
+
+        if ( v < 1 ) {
+
+            material.transparent = true;
+            material.depthWrite = false;
+
+        } else {
+
+            material.transparent = false;
+            material.depthWrite = true;
+
+        }
+
+        material.opacity = v;
+        material.needsUpdate = true;
+
+    } );
+    gui.add( api, 'sortObjects' );
+    gui.add( api, 'perObjectFrustumCulled' );
+    gui.add( api, 'useCustomSort' );
+
+    guiStatsEl = document.createElement( 'li' );
+    guiStatsEl.classList.add( 'gui-stats' );
+
+    // listeners
+
+    window.addEventListener( 'resize', onWindowResize );
+
+}
+
+//
+
+function sortFunction( list ) {
+
+    // initialize options
+    this._options = this._options || {
+        get: el => el.z,
+        aux: new Array( this.maxInstanceCount )
+    };
+
+    const options = this._options;
+    options.reversed = this.material.transparent;
+
+    let minZ = Infinity;
+    let maxZ = - Infinity;
+    for ( let i = 0, l = list.length; i < l; i ++ ) {
+
+        const z = list[ i ].z;
+        if ( z > maxZ ) maxZ = z;
+        if ( z < minZ ) minZ = z;
+
+    }
+
+    // convert depth to unsigned 32 bit range
+    const depthDelta = maxZ - minZ;
+    const factor = ( 2 ** 32 - 1 ) / depthDelta; // UINT32_MAX / z range
+    for ( let i = 0, l = list.length; i < l; i ++ ) {
+
+        list[ i ].z -= minZ;
+        list[ i ].z *= factor;
+
+    }
+
+    // perform a fast-sort using the hybrid radix sort function
+    radixSort( list, options );
+
+}
+
+function onWindowResize() {
+
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+
+    renderer.setSize( width, height );
+
+}
+
+function animate() {
+
+    animateMeshes();
+
+    controls.update();
+    stats.update();
+
+    render();
+
+}
+
+function animateMeshes() {
+
+    const loopNum = Math.min( api.count, api.dynamic );
+
+    // 注释掉自动旋转逻辑，让对象保持静止
+    /*
+    if ( api.method === Method.BATCHED ) {
+
+        for ( let i = 0; i < loopNum; i ++ ) {
+
+            const rotationMatrix = mesh.userData.rotationSpeeds[ i ];
+            const id = ids[ i ];
+
+            mesh.getMatrixAt( id, matrix );
+            matrix.multiply( rotationMatrix );
+            mesh.setMatrixAt( id, matrix );
+
+        }
+
+    } else {
+
+        for ( let i = 0; i < loopNum; i ++ ) {
+
+            const child = mesh.children[ i ];
+            const rotationSpeed = child.userData.rotationSpeed;
+
+            child.rotation.set(
+                child.rotation.x + rotationSpeed.x,
+                child.rotation.y + rotationSpeed.y,
+                child.rotation.z + rotationSpeed.z
+            );
+
+        }
+
+    }
+    */
+
+}
+
+function render() {
+
+    if ( mesh.isBatchedMesh ) {
+
+        mesh.sortObjects = api.sortObjects;
+        mesh.perObjectFrustumCulled = api.perObjectFrustumCulled;
+        mesh.setCustomSort( api.useCustomSort ? sortFunction : null );
+
+    }
+
+    renderer.render( scene, camera );
+
+}
+
+
+// 添加鼠标点击事件处理函数
+function onMouseClick( event ) {
+    
+    // 计算鼠标在归一化设备坐标中的位置
+    mouse.x = ( event.clientX / renderer.domElement.clientWidth ) * 2 - 1;
+    mouse.y = - ( event.clientY / renderer.domElement.clientHeight ) * 2 + 1;
+    
+    // 更新射线检测器
+    raycaster.setFromCamera( mouse, camera );
+    
+    // 执行射线检测
+    let intersects = [];
+    
+    if ( api.method === Method.BATCHED && mesh && mesh.isBatchedMesh ) {
+        // 对于BatchedMesh，检测整个mesh
+        intersects = raycaster.intersectObject( mesh );
+    } else if ( mesh && mesh.children ) {
+        // 对于普通Group，检测所有子对象
+        intersects = raycaster.intersectObjects( mesh.children, true );
+    }
+    
+    if ( intersects.length > 0 ) {
+        const intersect = intersects[ 0 ];
+        console.log( '点击到:', intersect );
+        
+        handleObjectSelection( intersect );
+    } else {
+        // 点击空白处，清除所有选中
+        clearSelection();
+    }
+}
+
+// 处理对象选中
+function handleObjectSelection( intersect ) {
+    if ( api.method === Method.BATCHED && mesh.isBatchedMesh ) {
+        // BatchedMesh的处理逻辑
+        const instanceId = intersect.instanceId;
+        
+        if ( selectedInstances.has( instanceId ) ) {
+            // 如果已经选中，取消选中
+            deselectInstance( instanceId );
+        } else {
+            // 如果未选中，选中它
+            selectInstance( instanceId );
+        }
+    } else {
+        // 普通Mesh的处理逻辑
+        const object = intersect.object;
+        
+        if ( selectedInstances.has( object ) ) {
+            // 如果已经选中，取消选中
+            deselectObject( object );
+        } else {
+            // 如果未选中，选中它
+            selectObject( object );
+        }
+    }
+}
+
+// 选中BatchedMesh实例
+function selectInstance( instanceId ) {
+    console.log( '选中实例:', instanceId );
+    
+
+    selectedInstances.add( instanceId );
+    
+    // 保存原始颜色
+    if ( !originalColors.has( instanceId ) ) {
+        const color = new THREE.Color();
+        mesh.getInstanceColorAt( instanceId, color );
+        originalColors.set( instanceId, color.clone() );
+    }
+    
+    // 设置选中颜色为红色
+    mesh.setColorAt( instanceId, new THREE.Color( 0xff0000 ) );
+    mesh.instanceColor.needsUpdate = true;
+    
+    console.log( '选中实例:', instanceId );
+}
+
+// 取消选中BatchedMesh实例
+function deselectInstance( instanceId ) {
+    selectedInstances.delete( instanceId );
+    
+    // 恢复原始颜色
+    if ( originalColors.has( instanceId ) ) {
+        mesh.setColorAt( instanceId, originalColors.get( instanceId ) );
+        mesh.instanceColor.needsUpdate = true;
+        originalColors.delete( instanceId );
+    }
+    
+    console.log( '取消选中实例:', instanceId );
+}
+
+// 选中普通Mesh对象
+function selectObject( object ) {
+    selectedInstances.add( object );
+    
+    // 保存原始颜色
+    if ( !originalColors.has( object ) ) {
+        originalColors.set( object, object.material.color.clone() );
+    }
+    
+    // 设置选中颜色为红色
+    object.material.color.set( 0xff0000 );
+    object.material.needsUpdate = true;
+    
+    console.log( '选中对象:', object );
+}
+
+// 取消选中普通Mesh对象
+function deselectObject( object ) {
+    selectedInstances.delete( object );
+    
+    // 恢复原始颜色
+    if ( originalColors.has( object ) ) {
+        object.material.color.copy( originalColors.get( object ) );
+        object.material.needsUpdate = true;
+        originalColors.delete( object );
+    }
+    
+    console.log( '取消选中对象:', object );
+}
+
+// 清除所有选中
+function clearSelection() {
+    if ( api.method === Method.BATCHED && mesh.isBatchedMesh ) {
+        // BatchedMesh的处理
+        for ( const instanceId of selectedInstances ) {
+            deselectInstance( instanceId );
+        }
+    } else {
+        // 普通Mesh的处理
+        for ( const object of selectedInstances ) {
+            deselectObject( object );
+        }
+    }
+    
+    selectedInstances.clear();
+    console.log( '清除所有选中' );
+}
+
